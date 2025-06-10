@@ -2,26 +2,25 @@ var tab_listeners = {};
 var tab_push = {}, tab_lasturl = {};
 var selectedId = -1;
 
-function refreshCount() {
-	txt = tab_listeners[selectedId] ? tab_listeners[selectedId].length : 0;
-	chrome.tabs.get(selectedId, function() {
-		if (!chrome.runtime.lastError) {
-			chrome.browserAction.setBadgeText({"text": ''+txt, tabId: selectedId});
-			if(txt > 0) {
-				chrome.browserAction.setBadgeBackgroundColor({ color: [255, 0, 0, 255]});
-			} else {
-				chrome.browserAction.setBadgeBackgroundColor({ color: [0, 0, 255, 0] });
-			}
-		}
-	});
+async function refreshCount(tabId) {
+	const key = `tab_${tabId}`;
+	const data = await chrome.storage.session.get(key);
+	const listeners = data[key] ? data[key].listeners : [];
+	const txt = listeners ? listeners.length : 0;
+	chrome.action.setBadgeText({ "text": '' + txt, tabId: tabId });
+	if (txt > 0) {
+		chrome.action.setBadgeBackgroundColor({ color: [255, 0, 0, 255], tabId: tabId });
+	} else {
+		chrome.action.setBadgeBackgroundColor({ color: [0, 0, 255, 0], tabId: tabId });
+	}
 }
 
 function logListener(data) {
 	chrome.storage.sync.get({
 		log_url: ''
-	}, function(items) {
+	}, function (items) {
 		log_url = items.log_url;
-		if(!log_url.length) return;
+		if (!log_url.length) return;
 		data = JSON.stringify(data);
 		try {
 			fetch(log_url, {
@@ -31,67 +30,88 @@ function logListener(data) {
 				},
 				body: data
 			});
-		} catch(e) { }
+		} catch (e) { }
 	});
 }
 
-chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
-	console.log('message from cs', msg);
-	tabId = sender.tab.id;
-	if(msg.listener) {
-		if(msg.listener == 'function () { [native code] }') return;
+chrome.runtime.onMessage.addListener(async function (msg, sender, sendResponse) {
+	const tabId = sender.tab.id;
+	const key = `tab_${tabId}`;
+	let tabData = (await chrome.storage.session.get(key))[key] || {};
+
+	if (msg.listener) {
+		if (msg.listener == 'function () { [native code] }') return;
 		msg.parent_url = sender.tab.url;
-		if(!tab_listeners[tabId]) tab_listeners[tabId] = [];
-		tab_listeners[tabId][tab_listeners[tabId].length] = msg;
+		if (!tabData.listeners) tabData.listeners = [];
+		tabData.listeners.push(msg);
 		logListener(msg);
 	}
-	if(msg.pushState) {
-		tab_push[tabId] = true;
+	if (msg.pushState) {
+		tabData.pushState = true;
 	}
-	if(msg.changePage) {
-		delete tab_lasturl[tabId];
+	if (msg.changePage) {
+		delete tabData.lastUrl;
 	}
-	if(msg.log) {
-		console.log(msg.log);
-	} else {
-		refreshCount();
+	await chrome.storage.session.set({ [key]: tabData });
+
+	if (!msg.log) {
+		const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+		if (tab && tab.id === tabId) {
+			refreshCount(tabId);
+		}
 	}
 });
 
-chrome.tabs.onUpdated.addListener(function(tabId, props) {
-	console.log(props);
+chrome.tabs.onUpdated.addListener(async function (tabId, props) {
+	const key = `tab_${tabId}`;
+	let tabData = (await chrome.storage.session.get(key))[key] || {};
+
 	if (props.status == "complete") {
-		if(tabId == selectedId) refreshCount();
-	} else if(props.status) {
-		if(tab_push[tabId]) {
-			//this was a pushState, ignore
-			delete tab_push[tabId];
+		const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+		if (tab && tab.id === tabId) {
+			refreshCount(tabId);
+		}
+	} else if (props.status) {
+		if (tabData.pushState) {
+			delete tabData.pushState;
 		} else {
-			//if(props.url && tab_lasturl[tabId] && props.url.split('#')[0] == tab_lasturl[tabId]) {
-				//same url as before, only a hash change, ignore
-			//} else 
-			if(!tab_lasturl[tabId]) {
-				//wipe on other statuses, but only if lastpage is not set (aka, changePage did not run)
-				tab_listeners[tabId] = [];
+			if (!tabData.lastUrl) {
+				tabData.listeners = [];
 			}
 		}
 	}
-	if(props.status == "loading")
-		tab_lasturl[tabId] = true;
+	if (props.status == "loading") {
+		tabData.lastUrl = true;
+	}
+
+	await chrome.storage.session.set({ [key]: tabData });
 });
 
-chrome.tabs.onActivated.addListener(function(activeInfo) {
-	selectedId = activeInfo.tabId;
-	refreshCount();
+chrome.tabs.onActivated.addListener(function (activeInfo) {
+	refreshCount(activeInfo.tabId);
 });
 
-chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-	selectedId = tabs[0].id;
-	refreshCount();
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+	const key = `tab_${tabId}`;
+	await chrome.storage.session.remove(key);
 });
 
-chrome.extension.onConnect.addListener(function(port) {
-	port.onMessage.addListener(function(msg) {
-		port.postMessage({listeners:tab_listeners});
+chrome.runtime.onConnect.addListener(function (port) {
+	port.onMessage.addListener(async function (msg) {
+		if (msg === "get-stuff") {
+			const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+			if (tab) {
+				const key = `tab_${tab.id}`;
+				const data = await chrome.storage.session.get(key);
+				port.postMessage({ listeners: data[key] ? data[key].listeners : [] });
+			}
+		}
 	});
 })
+
+chrome.runtime.onInstalled.addListener(async () => {
+	const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+	if (tabs.length > 0) {
+		refreshCount(tabs[0].id);
+	}
+});

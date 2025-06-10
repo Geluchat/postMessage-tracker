@@ -225,13 +225,16 @@ window.addEventListener('beforeunload', function(event) {
 	document.dispatchEvent(storeEvent);
 });
 
-(function() {
+function injectScript() {
     switch(document.contentType) {
         case 'application/xml':
             return;
     }
     var script = document.createElement("script");
-    script.setAttribute('type', 'text/javascript')
-    script.appendChild(document.createTextNode(injectedJS));
-    document.documentElement.appendChild(script);
-})();
+    script.src = chrome.runtime.getURL('injected.js');
+    (document.head || document.documentElement).appendChild(script);
+    script.onload = function() {
+        script.remove();
+    };
+}
+injectScript();
